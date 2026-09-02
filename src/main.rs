@@ -22,17 +22,27 @@ async fn main() -> Result<()> {
     let dry_run = env::args().any(|arg| arg == "--dry-run");
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let scheduler = tasks::run_forever(&bot, dry_run, shutdown_rx.clone());
-    let server = server::run(bot.clone(), shutdown_rx.clone());
+    let server_bot = bot.clone();
+    let scheduler_shutdown = shutdown_rx.clone();
+    let mut scheduler = tokio::spawn(async move {
+        tasks::run_forever(&bot, dry_run, scheduler_shutdown).await;
+    });
+    let mut server = tokio::spawn(server::run(server_bot, shutdown_rx.clone()));
 
     tokio::select! {
-        () = scheduler => {}
-        result = server => result.map_err(mwbot::Error::IoError)?,
+        _ = &mut scheduler => {}
+        result = &mut server => {
+            let result = result.map_err(|error| mwbot::Error::Unknown(error.to_string()))?;
+            result.map_err(mwbot::Error::IoError)?;
+        }
         () = shutdown_signal() => {
             info!("Shutdown signal received");
             let _ = shutdown_tx.send(true);
         }
     }
+
+    drop(scheduler.await);
+    drop(server.await);
 
     Ok(())
 }

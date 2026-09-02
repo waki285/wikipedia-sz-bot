@@ -57,9 +57,12 @@ pub async fn run(bot: Bot, mut shutdown: watch::Receiver<bool>) -> io::Result<()
 /// Run the task named by the path segment and report the outcome.
 async fn run_task(State(bot): State<Bot>, Path(task_name): Path<String>) -> Response {
     match Task::from_name(&task_name) {
-        Some(task) => {
+        Some(task) if !task.is_resident() => {
             info!("Triggering task {task_name}");
-            match task.run(&bot, false).await {
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            // Signal shutdown so the task returns after one pass.
+            let _ = shutdown_tx.send(true);
+            match task.run(&bot, false, shutdown_rx).await {
                 Ok(()) => (StatusCode::OK, format!("{task_name}: done")).into_response(),
                 Err(error) => {
                     error!("Task {task_name} failed: {error}");
@@ -71,6 +74,11 @@ async fn run_task(State(bot): State<Bot>, Path(task_name): Path<String>) -> Resp
                 }
             }
         }
+        Some(_) => (
+            StatusCode::BAD_REQUEST,
+            format!("{task_name} is a resident task and cannot be triggered via HTTP"),
+        )
+            .into_response(),
         None => (StatusCode::NOT_FOUND, format!("unknown task: {task_name}")).into_response(),
     }
 }

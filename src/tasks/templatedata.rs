@@ -8,7 +8,8 @@ use std::{env, fmt::Write, time::Duration};
 
 use chrono::{DateTime, Utc};
 use mwbot::{Bot, Error, Result, SaveOptions};
-use tracing::info;
+use tokio::sync::watch;
+use tracing::{error, info};
 
 use crate::api::{
     HIGH_LIMIT, QueryPageItem, has_high_limits, main_namespace_transclusion_count, query_page,
@@ -34,7 +35,9 @@ const TEMPLATEDATA_BATCH: usize = 50;
 /// Run a single update: fetch, render, and save the maintenance page.
 ///
 /// If `dry_run` is true, prints the generated wikitext instead of saving.
-pub async fn run(bot: &Bot, dry_run: bool) -> Result<()> {
+/// `shutdown` is accepted for signature consistency but ignored, as this
+/// task runs to completion in one pass.
+pub async fn run(bot: &Bot, dry_run: bool, _shutdown: watch::Receiver<bool>) -> Result<()> {
     let templates = most_transcluded_without_templatedata(bot).await?;
     if templates.is_empty() {
         return Err(Error::Unknown(
@@ -130,10 +133,18 @@ async fn fill_main_namespace_counts(bot: &Bot, templates: &mut [QueryPageItem]) 
     let per_request = transclusion_limit(has_high_limits(bot).await?);
     let total = HIGH_LIMIT;
     for template in templates.iter_mut() {
-        let (count, truncated) =
-            main_namespace_transclusion_count(bot, &template.title, per_request, total).await?;
-        template.main_namespace_transclusions = count;
-        template.main_namespace_truncated = truncated;
+        match main_namespace_transclusion_count(bot, &template.title, per_request, total).await {
+            Ok((count, truncated)) => {
+                template.main_namespace_transclusions = count;
+                template.main_namespace_truncated = truncated;
+            }
+            Err(error) => {
+                error!(
+                    "{}: failed to count main-namespace usage: {error}",
+                    template.title
+                );
+            }
+        }
     }
     Ok(())
 }

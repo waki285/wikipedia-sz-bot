@@ -1,5 +1,6 @@
 //! Periodic maintenance tasks and their scheduler.
 
+pub mod recentchanges;
 pub mod templatedata;
 
 use std::time::Duration;
@@ -9,7 +10,7 @@ use tokio::{
     sync::watch,
     time::{Instant, sleep_until},
 };
-use tracing::{error, info};
+use tracing::info;
 
 /// A periodic maintenance task.
 #[derive(Debug, Clone, Copy)]
@@ -17,6 +18,8 @@ pub enum Task {
     /// Maintains the list of most-transcluded templates that lack
     /// `TemplateData`.
     Templatedata,
+    /// Reports edits that add `utm_source` tracking parameters.
+    Recentchanges,
 }
 
 impl Task {
@@ -25,6 +28,7 @@ impl Task {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "templatedata" => Some(Self::Templatedata),
+            "recentchanges" => Some(Self::Recentchanges),
             _ => None,
         }
     }
@@ -34,66 +38,80 @@ impl Task {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Templatedata => "templatedata",
+            Self::Recentchanges => "recentchanges",
         }
     }
 
-    /// Interval between runs.
+    /// Interval between runs; `None` means the task runs continuously until
+    /// shutdown.
     #[must_use]
-    pub const fn interval(self) -> Duration {
+    pub const fn interval(self) -> Option<Duration> {
         match self {
-            Self::Templatedata => templatedata::INTERVAL,
+            Self::Templatedata => Some(templatedata::INTERVAL),
+            Self::Recentchanges => None,
         }
+    }
+
+    /// Whether the task runs continuously instead of on a fixed interval.
+    #[must_use]
+    pub const fn is_resident(self) -> bool {
+        self.interval().is_none()
     }
 
     /// Run the task once.
-    pub async fn run(self, bot: &Bot, dry_run: bool) -> Result<()> {
+    pub async fn run(
+        self,
+        bot: &Bot,
+        dry_run: bool,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<()> {
         match self {
-            Self::Templatedata => templatedata::run(bot, dry_run).await,
+            Self::Templatedata => templatedata::run(bot, dry_run, shutdown).await,
+            Self::Recentchanges => recentchanges::run(bot, dry_run, shutdown).await,
         }
     }
 }
 
-/// Run all tasks forever, respecting each task's interval.
+/// Run all tasks in parallel.
 ///
-/// Tasks run immediately on startup and then every [`Task::interval`]. If
-/// `dry_run` is true, each task runs once and the function returns. The loop
-/// stops when `shutdown` is signalled.
+/// Batch tasks (with a finite interval) run immediately on startup and then
+/// every [`Task::interval`]; resident tasks (with [`Task::interval`] ==
+/// `None`) run continuously until `shutdown` is signalled. If `dry_run` is
+/// true, each task runs once. The whole loop stops when `shutdown` is
+/// signalled.
 pub async fn run_forever(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver<bool>) {
-    let tasks = [Task::Templatedata];
-    let mut next_runs: Vec<Instant> = tasks.iter().map(|_| Instant::now()).collect();
+    let tasks = [Task::Templatedata, Task::Recentchanges];
+    let mut handles = Vec::with_capacity(tasks.len());
 
-    loop {
-        let now = Instant::now();
-        for (task, next_run) in tasks.iter().zip(&mut next_runs) {
-            if *next_run > now {
-                continue;
-            }
-            match task.run(bot, dry_run).await {
-                Ok(()) => {
-                    let interval = task.interval();
-                    info!(
-                        "{}: completed, next run in {}h {:02}m",
-                        task.name(),
-                        interval.as_secs() / 3600,
-                        (interval.as_secs() % 3600) / 60
-                    );
+    for task in tasks {
+        let bot = bot.clone();
+        let mut task_shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            if let Some(interval) = task.interval() {
+                if dry_run {
+                    drop(task.run(&bot, true, task_shutdown).await);
+                } else {
+                    loop {
+                        drop(task.run(&bot, false, task_shutdown.clone()).await);
+                        tokio::select! {
+                            () = sleep_until(Instant::now() + interval) => {}
+                            _ = task_shutdown.changed() => {
+                                info!("{}: shutdown requested, stopping", task.name());
+                                break;
+                            }
+                        }
+                    }
                 }
-                Err(error) => error!("{}: {error}", task.name()),
+            } else {
+                drop(task.run(&bot, dry_run, task_shutdown).await);
             }
-            *next_run = now + task.interval();
-        }
+        }));
+    }
 
-        if dry_run {
-            break;
-        }
-
-        let earliest = next_runs.iter().copied().min().unwrap_or(now);
-        tokio::select! {
-            () = sleep_until(earliest) => {}
-            _ = shutdown.changed() => {
-                info!("shutdown requested, stopping scheduler");
-                break;
-            }
-        }
+    if !dry_run {
+        drop(shutdown.changed().await);
+    }
+    for handle in handles {
+        drop(handle.await);
     }
 }

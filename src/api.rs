@@ -1,8 +1,10 @@
 //! `MediaWiki` API helpers shared by maintenance tasks.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use mwbot::{Bot, Error, Result};
+use tokio::time::sleep;
+use tracing::error;
 
 /// Namespace ID of the `Template` namespace.
 const TEMPLATE_NAMESPACE: i64 = 10;
@@ -175,21 +177,20 @@ pub async fn main_namespace_transclusion_count(
 
 /// Return the number of pages whose wikitext invokes `{{template}}` or
 /// `{{template|...}}` directly, fetching the wikitext in batches.
+///
+/// A batch that keeps failing is logged and skipped so one bad response
+/// does not abort the whole scan.
 async fn count_direct_invocations(bot: &Bot, pageids: &[u64], template: &str) -> Result<u64> {
     let mut count = 0u64;
     for chunk in pageids.chunks(50) {
         let ids: Vec<String> = chunk.iter().map(u64::to_string).collect();
-        let resp = bot
-            .api()
-            .get_value(vec![
-                ("action", "query".to_string()),
-                ("prop", "revisions".to_string()),
-                ("rvprop", "content".to_string()),
-                ("rvslots", "main".to_string()),
-                ("pageids", ids.join("|")),
-                ("formatversion", "2".to_string()),
-            ])
-            .await?;
+        let resp = match retry_batch(bot, &ids).await {
+            Ok(resp) => resp,
+            Err(error) => {
+                error!("skipping batch: {error}");
+                continue;
+            }
+        };
         for page in resp["query"]["pages"]
             .as_array()
             .map_or(&[][..], |p| p.as_slice())
@@ -203,6 +204,35 @@ async fn count_direct_invocations(bot: &Bot, pageids: &[u64], template: &str) ->
         }
     }
     Ok(count)
+}
+
+/// Fetch a batch of page wikitext, retrying transient errors with backoff.
+async fn retry_batch(bot: &Bot, ids: &[String]) -> Result<serde_json::Value> {
+    let mut delay = Duration::from_secs(1);
+    let mut last_error: Option<Error> = None;
+    for _ in 0..3 {
+        let resp = bot
+            .api()
+            .get_value(vec![
+                ("action", "query".to_string()),
+                ("prop", "revisions".to_string()),
+                ("rvprop", "content".to_string()),
+                ("rvslots", "main".to_string()),
+                ("pageids", ids.join("|")),
+                ("formatversion", "2".to_string()),
+            ])
+            .await;
+        match resp {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let error: Error = error.into();
+                last_error = Some(error);
+                sleep(delay).await;
+                delay *= 2;
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| Error::Unknown("failed to fetch page wikitext".to_string())))
 }
 
 /// Whether `content` contains a direct invocation of `{{template}}` or

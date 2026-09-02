@@ -21,8 +21,8 @@ const PAGE_TITLE: &str = "利用者:SzBot/メンテナンス/検知した編集"
 const EDIT_SUMMARY: &str = "Bot: 検知した編集を更新";
 /// Maximum number of edits a user may have to be considered a suspect.
 const EDIT_COUNT_LIMIT: u64 = 100;
-/// How many recent changes to fetch per request.
-const RC_PAGE_SIZE: u64 = 500;
+/// How many recent changes to fetch per poll.
+const RC_PAGE_SIZE: u64 = 50;
 /// How many edits to check per request when fetching diffs.
 const BATCH_SIZE: usize = 50;
 
@@ -38,21 +38,65 @@ struct Edit {
 
 /// Run the monitor continuously, polling `recentchanges` every
 /// [`POLL_INTERVAL`] and saving the accumulated report every
-/// [`SAVE_INTERVAL`]. Stops when `shutdown` is signalled.
+/// [`SAVE_INTERVAL`]. Stops promptly when `shutdown` is signalled.
 ///
 /// If `dry_run` is true, performs a single poll and prints the report.
 pub async fn run(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver<bool>) -> Result<()> {
     let mut since = Utc::now() - ChronoDuration::hours(2);
     let mut matching = Vec::new();
-    let mut last_save = Utc::now();
+    // Ensure the report is saved on the first pass even when nothing matches.
+    let save_interval = ChronoDuration::from_std(SAVE_INTERVAL).unwrap_or(ChronoDuration::hours(2));
+    let mut last_save = Utc::now() - save_interval;
 
     loop {
-        let edits = recent_changes(bot, since).await?;
+        let edits = tokio::select! {
+            result = recent_changes(bot, since) => {
+                match result {
+                    Ok(edits) => edits,
+                    Err(error) => {
+                        error!("recentchanges poll failed: {error}");
+                        Vec::new()
+                    }
+                }
+            }
+            _ = shutdown.changed() => {
+                info!("shutdown requested, stopping monitor");
+                break;
+            }
+        };
         if let Some(last) = edits.last() {
             since = last.timestamp;
         }
-        let suspect_edits = filter_by_edit_count(bot, edits).await?;
-        let new_matching = check_diffs(bot, suspect_edits).await?;
+        let suspect_edits = tokio::select! {
+            result = filter_by_edit_count(bot, edits) => {
+                match result {
+                    Ok(edits) => edits,
+                    Err(error) => {
+                        error!("edit count filter failed: {error}");
+                        Vec::new()
+                    }
+                }
+            }
+            _ = shutdown.changed() => {
+                info!("shutdown requested, stopping monitor");
+                break;
+            }
+        };
+        let new_matching = tokio::select! {
+            result = check_diffs(bot, suspect_edits) => {
+                match result {
+                    Ok(edits) => edits,
+                    Err(error) => {
+                        error!("diff check failed: {error}");
+                        Vec::new()
+                    }
+                }
+            }
+            _ = shutdown.changed() => {
+                info!("shutdown requested, stopping monitor");
+                break;
+            }
+        };
         for edit in new_matching {
             if !matching.iter().any(|e: &Edit| e.revid == edit.revid) {
                 matching.push(edit);
@@ -67,7 +111,7 @@ pub async fn run(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver<bool>) 
 
         let now = Utc::now();
         let elapsed = now.signed_duration_since(last_save);
-        if elapsed >= ChronoDuration::from_std(SAVE_INTERVAL).unwrap_or(ChronoDuration::hours(2))
+        if elapsed >= save_interval
             || !matching.is_empty() && matching_since_save(&matching, last_save)
         {
             let wikitext = build_report(&matching, now);
@@ -99,48 +143,38 @@ fn matching_since_save(edits: &[Edit], last_save: DateTime<Utc>) -> bool {
     edits.iter().any(|e| e.timestamp > last_save)
 }
 
-/// Fetch recent changes since `since`, newest first.
+/// Fetch recent changes since `since`, newest first, at most [`RC_PAGE_SIZE`].
 async fn recent_changes(bot: &Bot, since: DateTime<Utc>) -> Result<Vec<Edit>> {
-    let mut edits = Vec::new();
-    let mut rccontinue: Option<String> = None;
-
-    loop {
-        let mut params = vec![
+    let resp = bot
+        .api()
+        .get_value(vec![
             ("action", "query".to_string()),
             ("list", "recentchanges".to_string()),
             ("rcprop", "ids|title|user|timestamp".to_string()),
             ("rclimit", RC_PAGE_SIZE.to_string()),
             ("rcdir", "newer".to_string()),
             ("rcstart", since.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-        ];
-        if let Some(continue_val) = &rccontinue {
-            params.push(("rccontinue", continue_val.clone()));
-        }
-        let resp = bot.api().get_value(params).await?;
+        ])
+        .await?;
 
-        for item in resp["query"]["recentchanges"]
-            .as_array()
-            .map_or(&[][..], |items| items.as_slice())
-        {
-            let Some(revid) = item["revid"].as_u64() else {
-                continue;
-            };
-            let Some(title) = item["title"].as_str() else {
-                continue;
-            };
-            edits.push(Edit {
-                title: title.to_string(),
-                user: item["user"].as_str().map(str::to_string),
-                revid,
-                old_revid: item["old_revid"].as_u64(),
-                timestamp: parse_timestamp(item["timestamp"].as_str()),
-            });
-        }
-
-        rccontinue = resp["continue"]["rccontinue"].as_str().map(str::to_string);
-        if rccontinue.is_none() {
-            break;
-        }
+    let mut edits = Vec::new();
+    for item in resp["query"]["recentchanges"]
+        .as_array()
+        .map_or(&[][..], |items| items.as_slice())
+    {
+        let Some(revid) = item["revid"].as_u64() else {
+            continue;
+        };
+        let Some(title) = item["title"].as_str() else {
+            continue;
+        };
+        edits.push(Edit {
+            title: title.to_string(),
+            user: item["user"].as_str().map(str::to_string),
+            revid,
+            old_revid: item["old_revid"].as_u64(),
+            timestamp: parse_timestamp(item["timestamp"].as_str()),
+        });
     }
 
     Ok(edits)
@@ -288,7 +322,7 @@ fn build_report(edits: &[Edit], updated: DateTime<Utc>) -> String {
         let _ = writeln!(out, "| {}", edit.user.as_deref().unwrap_or("(匿名)"));
         let _ = writeln!(
             out,
-            "| {} [https://ja.wikipedia.org/w/index.php?diff={} 差分]",
+            "| {} [[Special:Diff/{}|差分]]",
             edit.timestamp.format("%H:%M"),
             edit.revid
         );

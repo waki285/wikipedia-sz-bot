@@ -1,13 +1,13 @@
 //! Entry point for the `SzBot` maintenance bot.
 
-use std::env;
 #[cfg(not(unix))]
 use std::future;
+use std::{env, time::Duration};
 
 use mwbot::{Bot, Result, init_logging};
 #[cfg(unix)]
 use tokio::signal::unix;
-use tokio::{signal, sync::watch};
+use tokio::{signal, sync::watch, time};
 use tracing::info;
 use wikipedia_sz_bot::{server, tasks};
 
@@ -41,8 +41,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    drop(scheduler.await);
-    drop(server.await);
+    drop(time::timeout(Duration::from_secs(30), scheduler).await);
+    drop(time::timeout(Duration::from_secs(30), server).await);
 
     Ok(())
 }

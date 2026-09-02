@@ -8,7 +8,7 @@ use std::time::Duration;
 use mwbot::{Bot, Result};
 use tokio::{
     sync::watch,
-    time::{Instant, sleep_until},
+    time::{self, Instant, sleep_until},
 };
 use tracing::info;
 
@@ -111,7 +111,8 @@ pub async fn run_forever(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver
     if !dry_run {
         drop(shutdown.changed().await);
     }
+    // Wait for tasks to finish, but don't block shutdown indefinitely.
     for handle in handles {
-        drop(handle.await);
+        drop(time::timeout(Duration::from_secs(30), handle).await);
     }
 }

@@ -44,6 +44,16 @@ To preview the generated wikitext without saving, use:
 cargo run -- --dry-run
 ```
 
+For a quick dry run, the number of templates scanned as candidates can be
+reduced with the `SZ_BOT_CANDIDATES` environment variable (default `1000`):
+
+```bash
+SZ_BOT_CANDIDATES=15 cargo run -- --dry-run
+```
+
+Templates are ranked by direct transclusion count in the main namespace
+(article namespace), not by total transclusion count.
+
 ## Triggering tasks over HTTP
 
 The bot also starts an HTTP server that runs a task immediately when a POST

@@ -6,8 +6,14 @@ use mwbot::{Bot, Error, Result};
 
 /// Namespace ID of the `Template` namespace.
 const TEMPLATE_NAMESPACE: i64 = 10;
+/// Namespace ID of the main (article) namespace.
+const MAIN_NAMESPACE: i64 = 0;
 /// How many results to request from a query page at once.
 const PAGE_SIZE: u64 = 500;
+/// How many results to request at most when counting a single template's
+/// direct transclusions. `5000` is the maximum for authenticated bots;
+/// anonymous requests are clamped to `500` by the API.
+pub const TRANSCLUSION_LIMIT: u64 = 5000;
 
 /// A single result from a query page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +21,9 @@ pub struct QueryPageItem {
     pub title: String,
     /// Numeric value attached to the result, e.g. a transclusion count.
     pub value: u64,
+    /// Number of direct transclusions in the main namespace, capped at
+    /// [`TRANSCLUSION_LIMIT`].
+    pub main_namespace_transclusions: u64,
 }
 
 /// Fetch one page of results from a query page, ordered by value descending.
@@ -50,6 +59,7 @@ pub async fn query_page(
             Some(QueryPageItem {
                 title: title.to_string(),
                 value,
+                main_namespace_transclusions: 0,
             })
         })
         .collect();
@@ -85,4 +95,29 @@ pub async fn titles_with_templatedata(
         }
     }
     Ok(with_templatedata)
+}
+
+/// Count direct transclusions of the given template in the main namespace.
+///
+/// Requests are capped at [`TRANSCLUSION_LIMIT`] results per the Wikimedia
+/// API rate limit guidance, so the count is exact only up to that limit.
+/// Returns the number of results received; if the request was truncated,
+/// the count equals `TRANSCLUSION_LIMIT` regardless of the true value.
+pub async fn main_namespace_transclusion_count(bot: &Bot, title: &str) -> Result<u64> {
+    let resp = bot
+        .api()
+        .get_value(vec![
+            ("action", "query".to_string()),
+            ("prop", "transcludedin".to_string()),
+            ("titles", title.to_string()),
+            ("tinamespace", MAIN_NAMESPACE.to_string()),
+            ("tilimit", TRANSCLUSION_LIMIT.to_string()),
+        ])
+        .await?;
+
+    let count = resp["query"]["pages"][0]["transcludedin"]
+        .as_array()
+        .map_or(0, |items| items.len() as u64);
+
+    Ok(count)
 }

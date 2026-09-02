@@ -9,7 +9,7 @@ use std::{collections::HashSet, fmt::Write, time::Duration};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use mwbot::{Bot, Result, SaveOptions};
 use tokio::{sync::watch, time::sleep};
-use tracing::info;
+use tracing::{error, info};
 
 /// How often to save the accumulated report.
 const SAVE_INTERVAL: Duration = Duration::from_hours(2);
@@ -195,27 +195,70 @@ async fn filter_by_edit_count(bot: &Bot, edits: Vec<Edit>) -> Result<Vec<Edit>> 
 }
 
 /// Keep only edits whose diff adds a URL with an `utm_source` parameter.
+///
+/// For new page creations (`old_revid` is `0`) the initial revision is
+/// checked directly, since there is no previous version to diff against.
 async fn check_diffs(bot: &Bot, edits: Vec<Edit>) -> Result<Vec<Edit>> {
     let mut matching = Vec::new();
     for edit in edits {
-        let Some(old_revid) = edit.old_revid else {
-            continue;
+        let has_utm = match edit.old_revid {
+            Some(0) => match initial_revision_has_utm(bot, edit.revid).await {
+                Ok(value) => value,
+                Err(error) => {
+                    error!("skipping new page {}: {error}", edit.title);
+                    continue;
+                }
+            },
+            Some(old_revid) => match diff_has_utm(bot, old_revid, edit.revid).await {
+                Ok(value) => value,
+                Err(error) => {
+                    error!("skipping diff for {}: {error}", edit.title);
+                    continue;
+                }
+            },
+            None => continue,
         };
-        let resp = bot
-            .api()
-            .get_value(vec![
-                ("action", "compare".to_string()),
-                ("fromrev", old_revid.to_string()),
-                ("torev", edit.revid.to_string()),
-                ("formatversion", "2".to_string()),
-            ])
-            .await?;
-        let body = resp["compare"]["body"].as_str().unwrap_or_default();
-        if added_line_has_utm(body) {
+        if has_utm {
             matching.push(edit);
         }
     }
     Ok(matching)
+}
+
+/// Whether the given revision's wikitext contains `utm_source=chatgpt.com`.
+async fn initial_revision_has_utm(bot: &Bot, revid: u64) -> Result<bool> {
+    let resp = bot
+        .api()
+        .get_value(vec![
+            ("action", "query".to_string()),
+            ("prop", "revisions".to_string()),
+            ("rvprop", "content".to_string()),
+            ("rvslots", "main".to_string()),
+            ("revids", revid.to_string()),
+            ("formatversion", "2".to_string()),
+        ])
+        .await?;
+    let content = resp["query"]["pages"][0]["revisions"][0]["slots"]["main"]["content"]
+        .as_str()
+        .unwrap_or_default();
+    Ok(content
+        .to_ascii_lowercase()
+        .contains("utm_source=chatgpt.com"))
+}
+
+/// Whether the diff between the given revisions adds `utm_source=chatgpt.com`.
+async fn diff_has_utm(bot: &Bot, old_revid: u64, revid: u64) -> Result<bool> {
+    let resp = bot
+        .api()
+        .get_value(vec![
+            ("action", "compare".to_string()),
+            ("fromrev", old_revid.to_string()),
+            ("torev", revid.to_string()),
+            ("formatversion", "2".to_string()),
+        ])
+        .await?;
+    let body = resp["compare"]["body"].as_str().unwrap_or_default();
+    Ok(added_line_has_utm(body))
 }
 
 /// Whether any added line in a diff body contains `utm_source=chatgpt.com`.

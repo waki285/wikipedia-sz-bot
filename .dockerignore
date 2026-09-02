@@ -1,4 +1,11 @@
 target
 .git
+.github
 work
 mwbot.toml
+README.md
+.clippy.toml
+.gitignore
+.rustfmt.toml
+LICENSE-*
+mwbot.example.toml

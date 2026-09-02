@@ -23,7 +23,7 @@ transclusion count) and filtered using the `templatedata` API.
 
 2. Edit `mwbot.toml` and set the bot credentials. Create an owner-only OAuth2
    consumer at
-   [Special:OAuthConsumerRegistration](https://ja.wikipedia.org/wiki/Special:OAuthConsumerRegistration)
+   [Special:OAuthConsumerRegistration](https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration)
    and fill in the `username` and `oauth2_token` fields.
 
    The file is git-ignored because it contains a secret.

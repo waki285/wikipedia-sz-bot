@@ -9,7 +9,7 @@ module-item-order-groupings = [
   ["macros", ["macro"]],
   ["asm", ["global_asm"]],
   ["consts", ["static", "const"]],
-  ["types", ["ty_alias", "enum", "struct", "union", "trait", "trait_alias"]],
+  ["types", ["ty_alias", "enum", "struct", "union", "trait", "trait_alias", "test_binder_constraints"]],
   ["impls", ["impl"]],
   ["fns", ["fn"]],
 ]

@@ -11,7 +11,7 @@ use mwbot::{Bot, Error, Result, SaveOptions};
 use tracing::info;
 
 use crate::api::{
-    QueryPageItem, has_high_limits, main_namespace_transclusion_count, query_page,
+    HIGH_LIMIT, QueryPageItem, has_high_limits, main_namespace_transclusion_count, query_page,
     titles_with_templatedata, transclusion_limit,
 };
 
@@ -50,7 +50,7 @@ pub async fn run(bot: &Bot, dry_run: bool) -> Result<()> {
     let page = bot.page(PAGE_TITLE)?;
     page.save(wikitext, &SaveOptions::summary(EDIT_SUMMARY))
         .await?;
-    info!("Saved {} templates", templates.len());
+    info!("Saved {} templates to [[{}]]", templates.len(), PAGE_TITLE);
     Ok(())
 }
 
@@ -87,6 +87,10 @@ async fn most_transcluded_without_templatedata(bot: &Bot) -> Result<Vec<QueryPag
             }
         }
     }
+    info!(
+        "Scanned {candidate_count} candidates, {} lack TemplateData",
+        without_templatedata.len()
+    );
 
     fill_main_namespace_counts(bot, &mut without_templatedata).await?;
     sort_by_main_namespace_count(&mut without_templatedata);
@@ -114,16 +118,20 @@ fn candidate_count_from(value: Option<String>) -> usize {
 
 /// Fill `main_namespace_transclusions` for each template.
 ///
-/// The `transcludedin` limit is chosen based on the user's `apihighlimits`
-/// right, so the API never clamps the requested `tilimit` (which would emit
-/// an `outofrange` warning). Each template is queried individually and
-/// sequentially to respect the Wikimedia API rate limits; the `mwapi` client
-/// retries automatically on `429` using the `Retry-After` header.
+/// The `transcludedin` limit per request is chosen based on the user's
+/// `apihighlimits` right, so the API never clamps the requested `tilimit`
+/// (which would emit an `outofrange` warning). Without the right, the API
+/// returns at most [`crate::api::transclusion_limit`] pages per call, but
+/// paging is used to reach the same overall cap as a bot. Each template is
+/// queried individually and sequentially to respect the Wikimedia API rate
+/// limits; the `mwapi` client retries automatically on `429` using the
+/// `Retry-After` header.
 async fn fill_main_namespace_counts(bot: &Bot, templates: &mut [QueryPageItem]) -> Result<()> {
-    let limit = transclusion_limit(has_high_limits(bot).await?);
+    let per_request = transclusion_limit(has_high_limits(bot).await?);
+    let total = HIGH_LIMIT;
     for template in templates.iter_mut() {
         let (count, truncated) =
-            main_namespace_transclusion_count(bot, &template.title, limit).await?;
+            main_namespace_transclusion_count(bot, &template.title, per_request, total).await?;
         template.main_namespace_transclusions = count;
         template.main_namespace_truncated = truncated;
     }

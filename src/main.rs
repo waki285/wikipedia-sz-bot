@@ -1,6 +1,8 @@
 //! Entry point for the `SzBot` maintenance bot.
 
-use std::{env, future};
+use std::env;
+#[cfg(not(unix))]
+use std::future;
 
 use mwbot::{Bot, Result, init_logging};
 #[cfg(unix)]

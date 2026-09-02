@@ -11,8 +11,9 @@ const MAIN_NAMESPACE: i64 = 0;
 /// How many results to request from a query page at once.
 const PAGE_SIZE: u64 = 500;
 /// Maximum `transcludedin` results for authenticated users with the
-/// `apihighlimits` right (bot flag).
-const HIGH_LIMIT: u64 = 5000;
+/// `apihighlimits` right (bot flag). Also the overall cap on pages examined
+/// for a single template, reached by paging when the right is absent.
+pub const HIGH_LIMIT: u64 = 5000;
 /// Maximum `transcludedin` results for anonymous and non-bot users.
 const LOW_LIMIT: u64 = 500;
 
@@ -119,38 +120,116 @@ pub async fn has_high_limits(bot: &Bot) -> Result<bool> {
 
 /// Count direct transclusions of the given template in the main namespace.
 ///
-/// Requests are capped at `limit` results, which should be [`HIGH_LIMIT`] for
-/// bots or [`LOW_LIMIT`] otherwise. The returned flag indicates whether more
-/// results exist beyond the cap (i.e. the count is truncated).
+/// The `transcludedin` API returns every page whose source mentions
+/// `{{template}}` anywhere (including inside comments and template
+/// arguments), so the resulting pages are checked individually by fetching
+/// their wikitext and looking for a real template invocation.
+///
+/// `per_request` is the number of pages requested per API call (`tilimit`),
+/// which is [`LOW_LIMIT`] without the `apihighlimits` right and [`HIGH_LIMIT`]
+/// with it. `total` caps the overall number of pages examined; the returned
+/// flag indicates whether more results exist beyond that cap (i.e. the count
+/// is truncated).
 pub async fn main_namespace_transclusion_count(
     bot: &Bot,
     title: &str,
-    limit: u64,
+    per_request: u64,
+    total: u64,
 ) -> Result<(u64, bool)> {
-    let resp = bot
-        .api()
-        .get_value(vec![
+    let mut pageids = Vec::new();
+    let mut ticontinue: Option<String> = None;
+
+    loop {
+        let mut params = vec![
             ("action", "query".to_string()),
             ("prop", "transcludedin".to_string()),
             ("titles", title.to_string()),
             ("tinamespace", MAIN_NAMESPACE.to_string()),
-            ("tilimit", limit.to_string()),
-        ])
-        .await?;
+            ("tilimit", per_request.to_string()),
+        ];
+        if let Some(continue_val) = &ticontinue {
+            params.push(("ticontinue", continue_val.clone()));
+        }
+        let resp = bot.api().get_value(params).await?;
 
-    let count = resp["query"]["pages"][0]["transcludedin"]
-        .as_array()
-        .map_or(0, |items| items.len() as u64);
-    let truncated = resp["continue"]["ticontinue"].as_str().is_some();
+        let items = resp["query"]["pages"][0]["transcludedin"]
+            .as_array()
+            .map_or(&[][..], |items| items.as_slice());
+        for item in items {
+            if let Some(pageid) = item["pageid"].as_u64() {
+                pageids.push(pageid);
+            }
+        }
 
+        ticontinue = resp["continue"]["ticontinue"].as_str().map(str::to_string);
+        if pageids.len() as u64 >= total || ticontinue.is_none() {
+            break;
+        }
+    }
+
+    let truncated = pageids.len() as u64 >= total;
+    let title = strip_template_prefix(title);
+    let count = count_direct_invocations(bot, &pageids, title).await?;
     Ok((count, truncated))
 }
 
-/// The `transcludedin` result limit for the current user.
+/// Return the number of pages whose wikitext invokes `{{template}}` or
+/// `{{template|...}}` directly, fetching the wikitext in batches.
+async fn count_direct_invocations(bot: &Bot, pageids: &[u64], template: &str) -> Result<u64> {
+    let mut count = 0u64;
+    for chunk in pageids.chunks(50) {
+        let ids: Vec<String> = chunk.iter().map(u64::to_string).collect();
+        let resp = bot
+            .api()
+            .get_value(vec![
+                ("action", "query".to_string()),
+                ("prop", "revisions".to_string()),
+                ("rvprop", "content".to_string()),
+                ("rvslots", "main".to_string()),
+                ("pageids", ids.join("|")),
+                ("formatversion", "2".to_string()),
+            ])
+            .await?;
+        for page in resp["query"]["pages"]
+            .as_array()
+            .map_or(&[][..], |p| p.as_slice())
+        {
+            let content = page["revisions"][0]["slots"]["main"]["content"]
+                .as_str()
+                .unwrap_or_default();
+            if has_template_invocation(content, template) {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Whether `content` contains a direct invocation of `{{template}}` or
+/// `{{template|...}}`. Template names are matched exactly (case-insensitive,
+/// leading/trailing whitespace ignored) and subpage or parser-function calls
+/// such as `{{template/foo}}` do not count.
+fn has_template_invocation(content: &str, template: &str) -> bool {
+    content.split("{{").skip(1).any(|rest| {
+        rest.split(['|', '}', '<', '\n'])
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case(template)
+    })
+}
+
+/// Strip the `Template:` namespace prefix, if present.
+fn strip_template_prefix(title: &str) -> &str {
+    title.strip_prefix("Template:").unwrap_or(title)
+}
+
+/// The `transcludedin` result limit per request for the current user.
 ///
 /// Returns [`HIGH_LIMIT`] when the user has the `apihighlimits` right,
 /// otherwise [`LOW_LIMIT`]. This matches the API's per-request maximum so
-/// that requesting `tilimit` never trips an `outofrange` warning.
+/// that requesting `tilimit` never trips an `outofrange` warning. Overall
+/// collection is still capped at [`HIGH_LIMIT`] pages by paging.
 #[must_use]
 pub const fn transclusion_limit(high_limits: bool) -> u64 {
     if high_limits { HIGH_LIMIT } else { LOW_LIMIT }
@@ -164,5 +243,45 @@ mod tests {
     fn selects_limit_by_high_limits() {
         assert_eq!(transclusion_limit(true), HIGH_LIMIT);
         assert_eq!(transclusion_limit(false), LOW_LIMIT);
+    }
+
+    #[test]
+    fn strips_template_prefix() {
+        assert_eq!(strip_template_prefix("Template:Infobox"), "Infobox");
+        assert_eq!(
+            strip_template_prefix("Template:Hlist/styles.css"),
+            "Hlist/styles.css"
+        );
+        assert_eq!(strip_template_prefix("Infobox"), "Infobox");
+    }
+
+    #[test]
+    fn detects_direct_invocations() {
+        assert!(has_template_invocation("foo {{Infobox}} bar", "Infobox"));
+        assert!(has_template_invocation(
+            "foo {{Infobox|title=x}} bar",
+            "Infobox"
+        ));
+        assert!(has_template_invocation(
+            "foo {{ infobox |x}} bar",
+            "Infobox"
+        ));
+        assert!(has_template_invocation("{{Infobox}}", "Infobox"));
+    }
+
+    #[test]
+    fn ignores_non_invocations() {
+        assert!(!has_template_invocation(
+            "foo {{Infobox/row}} bar",
+            "Infobox"
+        ));
+        assert!(!has_template_invocation(
+            "foo {{Infobox-sub}} bar",
+            "Infobox"
+        ));
+        assert!(!has_template_invocation("foo [[Infobox]] bar", "Infobox"));
+        assert!(!has_template_invocation("foo {{#if:x|y}} bar", "Infobox"));
+        assert!(!has_template_invocation("no template here", "Infobox"));
+        assert!(!has_template_invocation("foo {{Info}} bar", "Infobox"));
     }
 }

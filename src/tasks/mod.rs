@@ -69,7 +69,15 @@ pub async fn run_forever(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver
                 continue;
             }
             match task.run(bot, dry_run).await {
-                Ok(()) => info!("{}: completed", task.name()),
+                Ok(()) => {
+                    let interval = task.interval();
+                    info!(
+                        "{}: completed, next run in {}h {:02}m",
+                        task.name(),
+                        interval.as_secs() / 3600,
+                        (interval.as_secs() % 3600) / 60
+                    );
+                }
                 Err(error) => error!("{}: {error}", task.name()),
             }
             *next_run = now + task.interval();

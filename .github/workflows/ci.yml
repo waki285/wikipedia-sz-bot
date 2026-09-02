@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -Zthreads=8 -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install mold
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mold
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+
+      - name: Configure Cargo jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-ubuntu-24.04-nightly
+          cache-on-failure: true
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: cargo test --all-features
+        run: cargo test --locked --all-features
+
+      - name: cargo test --no-default-features
+        run: cargo test --locked --no-default-features
+
+      - name: cargo test --no-default-features --doc
+        run: cargo test --locked --no-default-features --doc
+
+      - name: cargo check --no-default-features --examples
+        run: cargo check --locked --no-default-features --examples

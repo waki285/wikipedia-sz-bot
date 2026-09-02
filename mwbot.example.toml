@@ -1,0 +1,15 @@
+# Copy this file to mwbot.toml and fill in your credentials.
+
+wiki_url = "https://ja.wikipedia.org/w/"
+
+[auth]
+username = "SzBot"
+oauth2_token = "REPLACE_WITH_OAUTH2_TOKEN"
+
+[general]
+# mwbot appends "User:SzBot mwbot-rs/<version>" automatically.
+user_agent = "wikipedia-sz-bot/0.1.0 (https://ja.wikipedia.org/wiki/User:鈴音雨)"
+
+[edit]
+mark_as_bot = true
+save_delay = 10

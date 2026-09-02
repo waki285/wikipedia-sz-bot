@@ -1,0 +1,10 @@
+services:
+  bot:
+    image: ghcr.io/waki285/wikipedia-sz-bot:latest
+    restart: unless-stopped
+    environment:
+      SZ_BOT_PORT: "8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./mwbot.toml:/app/mwbot.toml:ro

@@ -89,6 +89,11 @@ docker compose up -d
 The `SZ_BOT_PORT` and `RUST_LOG` environment variables are honoured, e.g.
 `docker run -e SZ_BOT_PORT=9000 -p 9000:9000 ...`.
 
+The container copies the mounted `mwbot.toml` to a private location and
+tightens its permissions to `600` at startup, so the host file does not need
+special permissions. However, the mount itself must be read-only as shown
+above.
+
 ### Build caching
 
 The Dockerfile uses a multi-stage build with a cached dependency layer, so

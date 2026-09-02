@@ -28,14 +28,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---- Runtime stage ----
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 szbot
+    && useradd --create-home --uid 10001 szbot \
+    && mkdir -p /data \
+    && chown szbot:szbot /data
 
-WORKDIR /app
+WORKDIR /data
 COPY --from=builder /app/target/release/wikipedia_sz_bot /usr/local/bin/wikipedia_sz_bot
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER szbot
 ENV SZ_BOT_PORT=8080
 EXPOSE 8080
-ENTRYPOINT ["wikipedia_sz_bot"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

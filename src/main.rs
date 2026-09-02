@@ -4,7 +4,6 @@ use std::env;
 
 use mwbot::{Bot, Result, init_logging};
 use tracing::info;
-
 use wikipedia_sz_bot::{server, tasks};
 
 #[tokio::main]

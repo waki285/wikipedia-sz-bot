@@ -10,10 +10,11 @@ const TEMPLATE_NAMESPACE: i64 = 10;
 const MAIN_NAMESPACE: i64 = 0;
 /// How many results to request from a query page at once.
 const PAGE_SIZE: u64 = 500;
-/// How many results to request at most when counting a single template's
-/// direct transclusions. `5000` is the maximum for authenticated bots;
-/// anonymous requests are clamped to `500` by the API.
-pub const TRANSCLUSION_LIMIT: u64 = 5000;
+/// Maximum `transcludedin` results for authenticated users with the
+/// `apihighlimits` right (bot flag).
+const HIGH_LIMIT: u64 = 5000;
+/// Maximum `transcludedin` results for anonymous and non-bot users.
+const LOW_LIMIT: u64 = 500;
 
 /// A single result from a query page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,9 +22,10 @@ pub struct QueryPageItem {
     pub title: String,
     /// Numeric value attached to the result, e.g. a transclusion count.
     pub value: u64,
-    /// Number of direct transclusions in the main namespace, capped at
-    /// [`TRANSCLUSION_LIMIT`].
+    /// Number of direct transclusions in the main namespace.
     pub main_namespace_transclusions: u64,
+    /// Whether the main-namespace count was truncated at the API limit.
+    pub main_namespace_truncated: bool,
 }
 
 /// Fetch one page of results from a query page, ordered by value descending.
@@ -60,6 +62,7 @@ pub async fn query_page(
                 title: title.to_string(),
                 value,
                 main_namespace_transclusions: 0,
+                main_namespace_truncated: false,
             })
         })
         .collect();
@@ -97,13 +100,33 @@ pub async fn titles_with_templatedata(
     Ok(with_templatedata)
 }
 
+/// Whether the current user has the `apihighlimits` right (bot flag).
+///
+/// The `apihighlimits` right raises the maximum number of results that can be
+/// requested with a single API call, including `transcludedin`.
+pub async fn has_high_limits(bot: &Bot) -> Result<bool> {
+    let resp = bot
+        .api()
+        .get_value(vec![
+            ("action", "query".to_string()),
+            ("meta", "userinfo".to_string()),
+            ("uiprop", "rights".to_string()),
+        ])
+        .await?;
+    let rights = resp["query"]["userinfo"]["rights"].as_array();
+    Ok(rights.is_some_and(|rights| rights.iter().any(|r| r == "apihighlimits")))
+}
+
 /// Count direct transclusions of the given template in the main namespace.
 ///
-/// Requests are capped at [`TRANSCLUSION_LIMIT`] results per the Wikimedia
-/// API rate limit guidance, so the count is exact only up to that limit.
-/// Returns the number of results received; if the request was truncated,
-/// the count equals `TRANSCLUSION_LIMIT` regardless of the true value.
-pub async fn main_namespace_transclusion_count(bot: &Bot, title: &str) -> Result<u64> {
+/// Requests are capped at `limit` results, which should be [`HIGH_LIMIT`] for
+/// bots or [`LOW_LIMIT`] otherwise. The returned flag indicates whether more
+/// results exist beyond the cap (i.e. the count is truncated).
+pub async fn main_namespace_transclusion_count(
+    bot: &Bot,
+    title: &str,
+    limit: u64,
+) -> Result<(u64, bool)> {
     let resp = bot
         .api()
         .get_value(vec![
@@ -111,13 +134,35 @@ pub async fn main_namespace_transclusion_count(bot: &Bot, title: &str) -> Result
             ("prop", "transcludedin".to_string()),
             ("titles", title.to_string()),
             ("tinamespace", MAIN_NAMESPACE.to_string()),
-            ("tilimit", TRANSCLUSION_LIMIT.to_string()),
+            ("tilimit", limit.to_string()),
         ])
         .await?;
 
     let count = resp["query"]["pages"][0]["transcludedin"]
         .as_array()
         .map_or(0, |items| items.len() as u64);
+    let truncated = resp["continue"]["ticontinue"].as_str().is_some();
 
-    Ok(count)
+    Ok((count, truncated))
+}
+
+/// The `transcludedin` result limit for the current user.
+///
+/// Returns [`HIGH_LIMIT`] when the user has the `apihighlimits` right,
+/// otherwise [`LOW_LIMIT`]. This matches the API's per-request maximum so
+/// that requesting `tilimit` never trips an `outofrange` warning.
+#[must_use]
+pub const fn transclusion_limit(high_limits: bool) -> u64 {
+    if high_limits { HIGH_LIMIT } else { LOW_LIMIT }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_limit_by_high_limits() {
+        assert_eq!(transclusion_limit(true), HIGH_LIMIT);
+        assert_eq!(transclusion_limit(false), LOW_LIMIT);
+    }
 }

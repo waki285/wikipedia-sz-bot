@@ -5,7 +5,10 @@ pub mod templatedata;
 use std::time::Duration;
 
 use mwbot::{Bot, Result};
-use tokio::time::{Instant, sleep_until};
+use tokio::{
+    sync::watch,
+    time::{Instant, sleep_until},
+};
 use tracing::{error, info};
 
 /// A periodic maintenance task.
@@ -53,8 +56,9 @@ impl Task {
 /// Run all tasks forever, respecting each task's interval.
 ///
 /// Tasks run immediately on startup and then every [`Task::interval`]. If
-/// `dry_run` is true, each task runs once and the function returns.
-pub async fn run_forever(bot: &Bot, dry_run: bool) {
+/// `dry_run` is true, each task runs once and the function returns. The loop
+/// stops when `shutdown` is signalled.
+pub async fn run_forever(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver<bool>) {
     let tasks = [Task::Templatedata];
     let mut next_runs: Vec<Instant> = tasks.iter().map(|_| Instant::now()).collect();
 
@@ -76,6 +80,12 @@ pub async fn run_forever(bot: &Bot, dry_run: bool) {
         }
 
         let earliest = next_runs.iter().copied().min().unwrap_or(now);
-        sleep_until(earliest).await;
+        tokio::select! {
+            () = sleep_until(earliest) => {}
+            _ = shutdown.changed() => {
+                info!("shutdown requested, stopping scheduler");
+                break;
+            }
+        }
     }
 }

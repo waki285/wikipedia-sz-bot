@@ -11,8 +11,8 @@ use mwbot::{Bot, Error, Result, SaveOptions};
 use tracing::info;
 
 use crate::api::{
-    QueryPageItem, TRANSCLUSION_LIMIT, main_namespace_transclusion_count, query_page,
-    titles_with_templatedata,
+    QueryPageItem, has_high_limits, main_namespace_transclusion_count, query_page,
+    titles_with_templatedata, transclusion_limit,
 };
 
 /// Interval between updates (every other day).
@@ -114,13 +114,18 @@ fn candidate_count_from(value: Option<String>) -> usize {
 
 /// Fill `main_namespace_transclusions` for each template.
 ///
-/// Each template is queried individually and sequentially to respect the
-/// Wikimedia API rate limits; the `mwapi` client retries automatically on
-/// `429` using the `Retry-After` header.
+/// The `transcludedin` limit is chosen based on the user's `apihighlimits`
+/// right, so the API never clamps the requested `tilimit` (which would emit
+/// an `outofrange` warning). Each template is queried individually and
+/// sequentially to respect the Wikimedia API rate limits; the `mwapi` client
+/// retries automatically on `429` using the `Retry-After` header.
 async fn fill_main_namespace_counts(bot: &Bot, templates: &mut [QueryPageItem]) -> Result<()> {
+    let limit = transclusion_limit(has_high_limits(bot).await?);
     for template in templates.iter_mut() {
-        template.main_namespace_transclusions =
-            main_namespace_transclusion_count(bot, &template.title).await?;
+        let (count, truncated) =
+            main_namespace_transclusion_count(bot, &template.title, limit).await?;
+        template.main_namespace_transclusions = count;
+        template.main_namespace_truncated = truncated;
     }
     Ok(())
 }
@@ -169,11 +174,11 @@ fn build_report(templates: &[QueryPageItem], updated: DateTime<Utc>) -> String {
 }
 
 /// Format the main-namespace direct transclusion count, appending `+` when
-/// the value is capped at [`crate::api::TRANSCLUSION_LIMIT`].
+/// the count was truncated at the API limit.
 #[must_use]
 fn format_main_namespace_count(template: &QueryPageItem) -> String {
     let mut text = format_count(template.main_namespace_transclusions);
-    if template.main_namespace_transclusions >= TRANSCLUSION_LIMIT {
+    if template.main_namespace_truncated {
         text.push('+');
     }
     text
@@ -202,6 +207,7 @@ mod tests {
             title: title.to_string(),
             value,
             main_namespace_transclusions: 0,
+            main_namespace_truncated: false,
         }
     }
 
@@ -233,8 +239,9 @@ mod tests {
     #[test]
     fn formats_capped_main_namespace_count() {
         let mut template = sample_template("Template:Infobox", 804_377);
-        template.main_namespace_transclusions = TRANSCLUSION_LIMIT;
-        assert_eq!(format_main_namespace_count(&template), "5,000+");
+        template.main_namespace_transclusions = 500;
+        template.main_namespace_truncated = true;
+        assert_eq!(format_main_namespace_count(&template), "500+");
 
         let exact = sample_template("Template:Reflist", 1_013_254);
         assert_eq!(format_main_namespace_count(&exact), "0");

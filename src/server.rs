@@ -11,7 +11,7 @@ use axum::{
     serve,
 };
 use mwbot::Bot;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::watch};
 use tracing::{error, info};
 
 use crate::tasks::Task;
@@ -38,13 +38,20 @@ fn parse_port(value: Option<String>) -> u16 {
 }
 
 /// Start the HTTP server and run it until shutdown.
-pub async fn run(bot: Bot) -> io::Result<()> {
+///
+/// When `shutdown` is signalled, in-flight requests are allowed to complete
+/// before the server stops listening.
+pub async fn run(bot: Bot, mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
     let app = Router::new()
         .route("/run/{task}", post(run_task))
         .with_state(bot);
     let listener = TcpListener::bind(("0.0.0.0", port())).await?;
     info!("Listening on {}", listener.local_addr()?);
-    serve(listener, app).await
+    serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.changed().await;
+        })
+        .await
 }
 
 /// Run the task named by the path segment and report the outcome.

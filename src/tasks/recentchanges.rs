@@ -313,19 +313,12 @@ fn build_report(edits: &[Edit], updated: DateTime<Utc>) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "{{| class=\"wikitable sortable\"");
     let _ = writeln!(out, "|-");
-    let _ = writeln!(out, "! ページ");
-    let _ = writeln!(out, "! 利用者");
+    let _ = writeln!(out, "! 日時");
     let _ = writeln!(out, "! 差分");
     for edit in edits {
         let _ = writeln!(out, "|-");
-        let _ = writeln!(out, "| [[:{}]]", edit.title);
-        let _ = writeln!(out, "| {}", edit.user.as_deref().unwrap_or("(匿名)"));
-        let _ = writeln!(
-            out,
-            "| {} [[Special:Diff/{}|差分]]",
-            edit.timestamp.format("%H:%M"),
-            edit.revid
-        );
+        let _ = writeln!(out, "| {}", edit.timestamp.format("%Y-%m-%d %H:%M"));
+        let _ = writeln!(out, "| [[Special:Diff/{}|差分]]", edit.revid);
     }
     let _ = writeln!(out, "|}}");
     out

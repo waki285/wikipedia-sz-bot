@@ -132,7 +132,8 @@ fn candidate_count_from(value: Option<String>) -> usize {
 async fn fill_main_namespace_counts(bot: &Bot, templates: &mut [QueryPageItem]) -> Result<()> {
     let per_request = transclusion_limit(has_high_limits(bot).await?);
     let total = HIGH_LIMIT;
-    for template in templates.iter_mut() {
+    let total_count = templates.len();
+    for (index, template) in templates.iter_mut().enumerate() {
         match main_namespace_transclusion_count(bot, &template.title, per_request, total).await {
             Ok((count, truncated)) => {
                 template.main_namespace_transclusions = count;
@@ -144,6 +145,13 @@ async fn fill_main_namespace_counts(bot: &Bot, templates: &mut [QueryPageItem]) 
                     template.title
                 );
             }
+        }
+        if (index + 1).is_multiple_of(10) {
+            info!(
+                "Counted main-namespace usage for {}/{} templates",
+                index + 1,
+                total_count
+            );
         }
     }
     Ok(())

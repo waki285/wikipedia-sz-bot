@@ -122,54 +122,35 @@ pub async fn has_high_limits(bot: &Bot) -> Result<bool> {
 
 /// Count direct transclusions of the given template in the main namespace.
 ///
-/// The `transcludedin` API returns every page whose source mentions
-/// `{{template}}` anywhere (including inside comments and template
-/// arguments), so the resulting pages are checked individually by fetching
-/// their wikitext and looking for a real template invocation.
-///
 /// `per_request` is the number of pages requested per API call (`tilimit`),
 /// which is [`LOW_LIMIT`] without the `apihighlimits` right and [`HIGH_LIMIT`]
-/// with it. `total` caps the overall number of pages examined; the returned
-/// flag indicates whether more results exist beyond that cap (i.e. the count
-/// is truncated).
+/// with it. Only a single page is examined; the returned flag indicates
+/// whether more results exist beyond that cap (i.e. the count is truncated).
 pub async fn main_namespace_transclusion_count(
     bot: &Bot,
     title: &str,
     per_request: u64,
-    total: u64,
 ) -> Result<(u64, bool)> {
-    let mut pageids = Vec::new();
-    let mut ticontinue: Option<String> = None;
-
-    loop {
-        let mut params = vec![
+    let resp = bot
+        .api()
+        .get_value(vec![
             ("action", "query".to_string()),
             ("prop", "transcludedin".to_string()),
             ("titles", title.to_string()),
             ("tinamespace", MAIN_NAMESPACE.to_string()),
             ("tilimit", per_request.to_string()),
-        ];
-        if let Some(continue_val) = &ticontinue {
-            params.push(("ticontinue", continue_val.clone()));
-        }
-        let resp = bot.api().get_value(params).await?;
+        ])
+        .await?;
 
-        let items = resp["query"]["pages"][0]["transcludedin"]
-            .as_array()
-            .map_or(&[][..], |items| items.as_slice());
-        for item in items {
-            if let Some(pageid) = item["pageid"].as_u64() {
-                pageids.push(pageid);
-            }
-        }
+    let items = resp["query"]["pages"][0]["transcludedin"]
+        .as_array()
+        .map_or(&[][..], |items| items.as_slice());
+    let pageids: Vec<u64> = items
+        .iter()
+        .filter_map(|item| item["pageid"].as_u64())
+        .collect();
+    let truncated = resp["continue"]["ticontinue"].as_str().is_some();
 
-        ticontinue = resp["continue"]["ticontinue"].as_str().map(str::to_string);
-        if pageids.len() as u64 >= total || ticontinue.is_none() {
-            break;
-        }
-    }
-
-    let truncated = pageids.len() as u64 >= total;
     let title = strip_template_prefix(title);
     let count = count_direct_invocations(bot, &pageids, title).await?;
     Ok((count, truncated))
@@ -258,8 +239,7 @@ fn strip_template_prefix(title: &str) -> &str {
 ///
 /// Returns [`HIGH_LIMIT`] when the user has the `apihighlimits` right,
 /// otherwise [`LOW_LIMIT`]. This matches the API's per-request maximum so
-/// that requesting `tilimit` never trips an `outofrange` warning. Overall
-/// collection is still capped at [`HIGH_LIMIT`] pages by paging.
+/// that requesting `tilimit` never trips an `outofrange` warning.
 #[must_use]
 pub const fn transclusion_limit(high_limits: bool) -> u64 {
     if high_limits { HIGH_LIMIT } else { LOW_LIMIT }

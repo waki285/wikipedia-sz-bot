@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::api::{
-    HIGH_LIMIT, QueryPageItem, has_high_limits, main_namespace_transclusion_count, query_page,
+    QueryPageItem, has_high_limits, main_namespace_transclusion_count, query_page,
     titles_with_templatedata, transclusion_limit,
 };
 
@@ -123,18 +123,16 @@ fn candidate_count_from(value: Option<String>) -> usize {
 ///
 /// The `transcludedin` limit per request is chosen based on the user's
 /// `apihighlimits` right, so the API never clamps the requested `tilimit`
-/// (which would emit an `outofrange` warning). Without the right, the API
-/// returns at most [`crate::api::transclusion_limit`] pages per call, but
-/// paging is used to reach the same overall cap as a bot. Each template is
-/// queried individually and sequentially to respect the Wikimedia API rate
-/// limits; the `mwapi` client retries automatically on `429` using the
-/// `Retry-After` header.
+/// (which would emit an `outofrange` warning). With the right, up to
+/// [`crate::api::HIGH_LIMIT`] pages are examined per template; without it,
+/// only [`crate::api::LOW_LIMIT`]. Each template is queried individually and
+/// sequentially to respect the Wikimedia API rate limits; the `mwapi` client
+/// retries automatically on `429` using the `Retry-After` header.
 async fn fill_main_namespace_counts(bot: &Bot, templates: &mut [QueryPageItem]) -> Result<()> {
     let per_request = transclusion_limit(has_high_limits(bot).await?);
-    let total = HIGH_LIMIT;
     let total_count = templates.len();
     for (index, template) in templates.iter_mut().enumerate() {
-        match main_namespace_transclusion_count(bot, &template.title, per_request, total).await {
+        match main_namespace_transclusion_count(bot, &template.title, per_request).await {
             Ok((count, truncated)) => {
                 template.main_namespace_transclusions = count;
                 template.main_namespace_truncated = truncated;

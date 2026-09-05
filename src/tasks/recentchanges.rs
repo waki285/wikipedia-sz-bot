@@ -44,9 +44,8 @@ struct Edit {
 pub async fn run(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver<bool>) -> Result<()> {
     let mut since = Utc::now() - ChronoDuration::hours(2);
     let mut matching = Vec::new();
-    // Ensure the report is saved on the first pass even when nothing matches.
     let save_interval = ChronoDuration::from_std(SAVE_INTERVAL).unwrap_or(ChronoDuration::hours(2));
-    let mut last_save = Utc::now() - save_interval;
+    let mut last_save = Utc::now();
 
     loop {
         let edits = tokio::select! {
@@ -111,9 +110,7 @@ pub async fn run(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver<bool>) 
 
         let now = Utc::now();
         let elapsed = now.signed_duration_since(last_save);
-        if elapsed >= save_interval
-            || !matching.is_empty() && matching_since_save(&matching, last_save)
-        {
+        if elapsed >= save_interval {
             let wikitext = build_report(&matching, now);
             let page = bot.page(PAGE_TITLE)?;
             page.save(wikitext, &SaveOptions::summary(EDIT_SUMMARY))
@@ -136,11 +133,6 @@ pub async fn run(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver<bool>) 
     }
 
     Ok(())
-}
-
-/// Whether any edit was found after `last_save`.
-fn matching_since_save(edits: &[Edit], last_save: DateTime<Utc>) -> bool {
-    edits.iter().any(|e| e.timestamp > last_save)
 }
 
 /// Fetch recent changes since `since`, newest first, at most [`RC_PAGE_SIZE`].

@@ -1,5 +1,6 @@
 //! Periodic maintenance tasks and their scheduler.
 
+pub mod ill;
 pub mod recentchanges;
 pub mod templatedata;
 
@@ -20,6 +21,9 @@ pub enum Task {
     Templatedata,
     /// Reports edits that add `utm_source` tracking parameters.
     Recentchanges,
+    /// Maintains the list of interlanguage links whose target already has a
+    /// Japanese article.
+    Ill,
 }
 
 impl Task {
@@ -29,6 +33,7 @@ impl Task {
         match name {
             "templatedata" => Some(Self::Templatedata),
             "recentchanges" => Some(Self::Recentchanges),
+            "ill" => Some(Self::Ill),
             _ => None,
         }
     }
@@ -39,6 +44,7 @@ impl Task {
         match self {
             Self::Templatedata => "templatedata",
             Self::Recentchanges => "recentchanges",
+            Self::Ill => "ill",
         }
     }
 
@@ -49,6 +55,7 @@ impl Task {
         match self {
             Self::Templatedata => Some(templatedata::INTERVAL),
             Self::Recentchanges => None,
+            Self::Ill => Some(ill::INTERVAL),
         }
     }
 
@@ -68,6 +75,7 @@ impl Task {
         match self {
             Self::Templatedata => templatedata::run(bot, dry_run, shutdown).await,
             Self::Recentchanges => recentchanges::run(bot, dry_run, shutdown).await,
+            Self::Ill => ill::run(bot, dry_run, shutdown).await,
         }
     }
 }
@@ -80,7 +88,7 @@ impl Task {
 /// true, each task runs once. The whole loop stops when `shutdown` is
 /// signalled.
 pub async fn run_forever(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver<bool>) {
-    let tasks = [Task::Templatedata, Task::Recentchanges];
+    let tasks = [Task::Templatedata, Task::Recentchanges, Task::Ill];
     let mut handles = Vec::with_capacity(tasks.len());
 
     for task in tasks {
@@ -108,9 +116,16 @@ pub async fn run_forever(bot: &Bot, dry_run: bool, mut shutdown: watch::Receiver
         }));
     }
 
-    if !dry_run {
-        drop(shutdown.changed().await);
+    if dry_run {
+        // A dry run has no shutdown signal to wait for, so let every task
+        // finish its single pass however long its scan takes.
+        for handle in handles {
+            drop(handle.await);
+        }
+        return;
     }
+
+    drop(shutdown.changed().await);
     // Wait for tasks to finish, but don't block shutdown indefinitely.
     for handle in handles {
         drop(time::timeout(Duration::from_secs(30), handle).await);

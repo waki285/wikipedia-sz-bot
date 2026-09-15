@@ -29,9 +29,19 @@ async fn main() -> Result<()> {
     });
     let mut server = tokio::spawn(server::run(server_bot, shutdown_rx.clone()));
 
+    // Track which handle the select! already drove to completion: polling a
+    // finished JoinHandle again panics.
+    let mut scheduler_done = false;
+    let mut server_done = false;
+
     tokio::select! {
-        _ = &mut scheduler => {}
+        _ = &mut scheduler => {
+            scheduler_done = true;
+            info!("All tasks finished");
+            let _ = shutdown_tx.send(true);
+        }
         result = &mut server => {
+            server_done = true;
             let result = result.map_err(|error| mwbot::Error::Unknown(error.to_string()))?;
             result.map_err(mwbot::Error::IoError)?;
         }
@@ -41,8 +51,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    drop(time::timeout(Duration::from_secs(30), scheduler).await);
-    drop(time::timeout(Duration::from_secs(30), server).await);
+    if !scheduler_done {
+        drop(time::timeout(Duration::from_secs(30), scheduler).await);
+    }
+    if !server_done {
+        drop(time::timeout(Duration::from_secs(30), server).await);
+    }
 
     Ok(())
 }

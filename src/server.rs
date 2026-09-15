@@ -59,9 +59,9 @@ async fn run_task(State(bot): State<Bot>, Path(task_name): Path<String>) -> Resp
     match Task::from_name(&task_name) {
         Some(task) if !task.is_resident() => {
             info!("Triggering task {task_name}");
-            let (shutdown_tx, shutdown_rx) = watch::channel(false);
-            // Signal shutdown so the task returns after one pass.
-            let _ = shutdown_tx.send(true);
+            // Hold the sender so the receiver stays open for the whole run;
+            // only resident tasks watch it, and they cannot be triggered here.
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
             match task.run(&bot, false, shutdown_rx).await {
                 Ok(()) => (StatusCode::OK, format!("{task_name}: done")).into_response(),
                 Err(error) => {

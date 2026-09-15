@@ -9,9 +9,12 @@ use tracing::error;
 /// Namespace ID of the `Template` namespace.
 const TEMPLATE_NAMESPACE: i64 = 10;
 /// Namespace ID of the main (article) namespace.
-const MAIN_NAMESPACE: i64 = 0;
+pub const MAIN_NAMESPACE: i64 = 0;
 /// How many results to request from a query page at once.
 const PAGE_SIZE: u64 = 500;
+/// How many pages may be requested at once when the response includes page
+/// content, which the API caps lower than metadata-only requests.
+pub const CONTENT_BATCH: usize = 50;
 /// Maximum `transcludedin` results for authenticated users with the
 /// `apihighlimits` right (bot flag). Also the overall cap on pages examined
 /// for a single template, reached by paging when the right is absent.
@@ -163,9 +166,9 @@ pub async fn main_namespace_transclusion_count(
 /// does not abort the whole scan.
 async fn count_direct_invocations(bot: &Bot, pageids: &[u64], template: &str) -> Result<u64> {
     let mut count = 0u64;
-    for chunk in pageids.chunks(50) {
+    for chunk in pageids.chunks(CONTENT_BATCH) {
         let ids: Vec<String> = chunk.iter().map(u64::to_string).collect();
-        let resp = match retry_batch(bot, &ids).await {
+        let resp = match page_contents(bot, &ids).await {
             Ok(resp) => resp,
             Err(error) => {
                 error!("skipping batch: {error}");
@@ -187,8 +190,12 @@ async fn count_direct_invocations(bot: &Bot, pageids: &[u64], template: &str) ->
     Ok(count)
 }
 
-/// Fetch a batch of page wikitext, retrying transient errors with backoff.
-async fn retry_batch(bot: &Bot, ids: &[String]) -> Result<serde_json::Value> {
+/// Fetch the wikitext of a batch of pages, retrying transient errors with
+/// backoff.
+///
+/// At most [`CONTENT_BATCH`] page ids may be passed, which is the API limit
+/// for requests that include page content.
+pub async fn page_contents(bot: &Bot, ids: &[String]) -> Result<serde_json::Value> {
     let mut delay = Duration::from_secs(1);
     let mut last_error: Option<Error> = None;
     for _ in 0..3 {

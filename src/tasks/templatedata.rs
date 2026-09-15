@@ -11,9 +11,12 @@ use mwbot::{Bot, Error, Result, SaveOptions};
 use tokio::sync::watch;
 use tracing::{error, info};
 
-use crate::api::{
-    QueryPageItem, has_high_limits, main_namespace_transclusion_count, query_page,
-    titles_with_templatedata, transclusion_limit,
+use crate::{
+    api::{
+        QueryPageItem, has_high_limits, main_namespace_transclusion_count, query_page,
+        titles_with_templatedata, transclusion_limit,
+    },
+    format,
 };
 
 /// Interval between updates (every other day).
@@ -191,7 +194,7 @@ fn build_report(templates: &[QueryPageItem], updated: DateTime<Utc>) -> String {
         let _ = writeln!(out, "|-");
         let _ = writeln!(out, "| {}", index + 1);
         let _ = writeln!(out, "| [[{}]]", template.title);
-        let _ = writeln!(out, "| {}", format_count(template.value));
+        let _ = writeln!(out, "| {}", format::count(template.value));
         let _ = writeln!(out, "| {}", format_main_namespace_count(template));
     }
     let _ = writeln!(out, "|}}");
@@ -202,25 +205,11 @@ fn build_report(templates: &[QueryPageItem], updated: DateTime<Utc>) -> String {
 /// the count was truncated at the API limit.
 #[must_use]
 fn format_main_namespace_count(template: &QueryPageItem) -> String {
-    let mut text = format_count(template.main_namespace_transclusions);
+    let mut text = format::count(template.main_namespace_transclusions);
     if template.main_namespace_truncated {
         text.push('+');
     }
     text
-}
-
-/// Format a number with thousands separators, e.g. `1013254` -> `1,013,254`.
-#[must_use]
-fn format_count(count: u64) -> String {
-    let digits = count.to_string();
-    let mut result = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            result.push(',');
-        }
-        result.push(ch);
-    }
-    result
 }
 
 #[cfg(test)]
@@ -234,14 +223,6 @@ mod tests {
             main_namespace_transclusions: 0,
             main_namespace_truncated: false,
         }
-    }
-
-    #[test]
-    fn formats_counts() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(999), "999");
-        assert_eq!(format_count(1000), "1,000");
-        assert_eq!(format_count(1_013_254), "1,013,254");
     }
 
     #[test]

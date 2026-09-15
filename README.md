@@ -3,7 +3,11 @@
 A maintenance bot for the Japanese Wikipedia, built with the
 [mwbot](https://crates.io/crates/mwbot) framework.
 
-Every other day, the bot collects the most-transcluded templates that have no
+## Tasks
+
+### `templatedata`
+
+Every other day, collects the most-transcluded templates that have no
 `TemplateData` and saves the top 50 to:
 
 ```
@@ -11,7 +15,46 @@ Every other day, the bot collects the most-transcluded templates that have no
 ```
 
 The list is obtained from the `Mostlinkedtemplates` special page (ranked by
-transclusion count) and filtered using the `templatedata` API.
+transclusion count) and filtered using the `templatedata` API. Templates are
+ranked by direct transclusion count in the main namespace (article namespace),
+not by total transclusion count.
+
+### `recentchanges`
+
+Runs continuously, polling recent changes and keeping edits by low-edit-count
+users whose diff adds a URL with an `utm_source` tracking parameter. The
+accumulated list is saved every two hours to:
+
+```
+利用者:SzBot/メンテナンス/検知した編集
+```
+
+### `ill`
+
+Once a week, scans every main-namespace article that transcludes
+`Template:仮リンク` and reports interlanguage links that could be replaced with
+a plain wikilink, saving the first 1000 findings to:
+
+```
+利用者:SzBot/メンテナンス/日本語版記事が存在する仮リンク
+```
+
+A call is reported when the Japanese article name in its first parameter is
+missing or a redirect, while the Wikidata item of the linked foreign article
+does carry a Japanese sitelink. A redirect that already resolves to exactly
+that Japanese article is not reported, since the link points at the right
+subject and those calls are tracked by a template category.
+
+Redirects to `Template:仮リンク` (`Ill`, `Ill2`, `Illm`, `Link-interwiki`,
+`Interlanguage link` and `Interlanguage link multi`) are recognised as well:
+`MediaWiki` records both the redirect and its target in `templatelinks`, so
+listing transclusions of the target finds every call.
+
+The scan covers roughly 300,000 articles and issues tens of thousands of API
+requests, which is why it runs weekly rather than daily. Wikidata is queried
+with the bot's own credentials, since authenticated requests are rate-limited
+far less aggressively; if those credentials are not accepted there, the scan
+falls back to anonymous access and logs a warning.
 
 ## Setup
 
@@ -36,7 +79,7 @@ Build and run the application:
 cargo run
 ```
 
-The bot runs in a built-in loop and updates the page every 48 hours.
+The bot runs in a built-in loop, running each task on its own schedule.
 
 To preview the generated wikitext without saving, use:
 
@@ -44,15 +87,45 @@ To preview the generated wikitext without saving, use:
 cargo run -- --dry-run
 ```
 
-For a quick dry run, the number of templates scanned as candidates can be
-reduced with the `SZ_BOT_CANDIDATES` environment variable (default `1000`):
+A dry run performs a single pass of every task and prints the result, so it
+runs the full `ill` scan unless the scan is capped as shown below.
+
+Two environment variables shrink the work for a quick dry run:
 
 ```bash
+# Templates scanned as candidates by `templatedata` (default 1000)
 SZ_BOT_CANDIDATES=15 cargo run -- --dry-run
+
+# Articles scanned by `ill` (default: no limit)
+SZ_BOT_ILL_PAGES=200 cargo run -- --dry-run
 ```
 
-Templates are ranked by direct transclusion count in the main namespace
-(article namespace), not by total transclusion count.
+## Following an `ill` scan
+
+A scan takes hours, so it logs its progress every five minutes at `INFO`:
+
+```
+Scanned 50,000/297,792 articles (16%), 1,234 findings, 42m00s elapsed, ~3h28m left
+```
+
+When requests are answered far more slowly than a round trip should take, the
+scan warns that it is being rate-limited, which is the usual reason a run takes
+much longer than expected:
+
+```
+jawiki: 8.3s per request, far above a normal round trip. The API is
+rate-limiting the bot, so this scan will take much longer than usual.
+```
+
+Set `RUST_LOG=wikipedia_sz_bot=debug` for one line per 500-article round with
+the lookup and request counts behind those timings:
+
+```
+round: 1100 calls, 1048 titles in 21 requests (174.4s), 1084 sitelinks in 34 requests (181.2s)
+```
+
+Note that listing the articles to scan happens before the first progress line,
+and logs nothing while it pages through the transclusion list.
 
 ## Triggering tasks over HTTP
 
@@ -66,6 +139,11 @@ curl -X POST http://localhost:8080/run/templatedata
 The endpoint path selects the task:
 
 - `POST /run/templatedata` - run the template data maintenance task
+- `POST /run/ill` - run the interlanguage link scan
+
+Resident tasks such as `recentchanges` cannot be triggered this way; the
+request is rejected with `400`. The request is held open until the task
+finishes, so triggering `ill` keeps the connection open for the whole scan.
 
 The listening port is set with the `SZ_BOT_PORT` environment variable and
 defaults to `8080`:

@@ -23,11 +23,12 @@ pub enum PageState {
 /// Look up the state of each title, keyed by the title as passed in.
 ///
 /// `titles` must not exceed the API's limit for a single request; the caller
-/// batches accordingly.
+/// batches accordingly. Sent as a POST, since a batch of percent-encoded
+/// titles can exceed the server's URI length limit.
 pub async fn page_states(bot: &Bot, titles: &[String]) -> Result<HashMap<String, PageState>> {
     let resp = bot
         .api()
-        .get_value(vec![
+        .post_value(vec![
             ("action", "query".to_string()),
             ("prop", "info".to_string()),
             ("titles", titles.join("|")),

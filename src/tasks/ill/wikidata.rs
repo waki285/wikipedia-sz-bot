@@ -88,10 +88,13 @@ impl Wikidata {
     }
 
     /// Japanese counterparts of the given Wikidata items, keyed by item id.
+    ///
+    /// Sent as a POST: a batch of ids is long enough that a query string can
+    /// exceed the server's URI length limit.
     pub async fn ja_titles_for_ids(&self, ids: &[String]) -> Result<HashMap<String, String>> {
         let resp = self
             .client
-            .get_value(vec![
+            .post_value(vec![
                 ("action", "wbgetentities".to_string()),
                 ("ids", ids.join("|")),
                 ("props", "sitelinks".to_string()),
@@ -116,6 +119,10 @@ impl Wikidata {
     ///
     /// Titles without a Wikidata item, or whose item has no Japanese sitelink,
     /// are absent from the result.
+    ///
+    /// Sent as a POST: a batch of titles easily exceeds the server's URI
+    /// length limit once percent-encoded, especially in a non-Latin script
+    /// where every character takes three bytes.
     pub async fn ja_titles_for_site(
         &self,
         site: &str,
@@ -123,7 +130,7 @@ impl Wikidata {
     ) -> Result<HashMap<String, String>> {
         let resp = self
             .client
-            .get_value(vec![
+            .post_value(vec![
                 ("action", "wbgetentities".to_string()),
                 ("sites", site.to_string()),
                 ("titles", titles.join("|")),

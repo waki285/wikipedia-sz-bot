@@ -519,11 +519,23 @@ fn match_target(
         };
         let key = (site, normalize_title(&target.title));
         let linked = caches.sitelinks.get(&key)?.clone()?;
-        if matches!(state, PageState::Redirect(to) if *to == linked) {
-            return None;
-        }
-        Some((target.clone(), linked))
+        offers_new_link(&call.ja_title, state, &linked).then(|| (target.clone(), linked))
     })
+}
+
+/// Whether the Japanese article found through Wikidata offers anything the
+/// call does not already link to.
+///
+/// It does not when the item points at the call's own first parameter: the
+/// Japanese Wikipedia then has no separate article for the subject, only the
+/// same redirect the call already names. Nor does it when the first parameter
+/// redirects to exactly that article, which is a link to the right subject
+/// already.
+fn offers_new_link(ja_title: &str, state: &PageState, linked: &str) -> bool {
+    if normalize_title(ja_title) == normalize_title(linked) {
+        return false;
+    }
+    !matches!(state, PageState::Redirect(to) if to == linked)
 }
 
 /// How many articles to scan at most.
@@ -717,6 +729,35 @@ mod tests {
             sitelink_requests: 0,
         };
         assert!(idle.throttle_warning().is_none());
+    }
+
+    #[test]
+    fn ignores_an_item_pointing_at_the_call_itself() {
+        // {{仮リンク|世界平和|en|World peace}}, where 世界平和 redirects to 平和
+        // and the item's Japanese sitelink is 世界平和 itself.
+        let state = PageState::Redirect("平和".to_string());
+        assert!(!offers_new_link("世界平和", &state, "世界平和"));
+    }
+
+    #[test]
+    fn ignores_a_redirect_to_the_linked_article() {
+        let state = PageState::Redirect("平和".to_string());
+        assert!(!offers_new_link("世界平和 (曖昧さ回避)", &state, "平和"));
+    }
+
+    #[test]
+    fn reports_a_differently_named_article() {
+        assert!(offers_new_link(
+            "クトルグ・ハン朝",
+            &PageState::Missing,
+            "カラヒタイ朝"
+        ));
+    }
+
+    #[test]
+    fn reports_a_redirect_to_a_different_article() {
+        let state = PageState::Redirect("平和".to_string());
+        assert!(offers_new_link("世界平和 (曖昧さ回避)", &state, "国際平和"));
     }
 
     #[test]

@@ -119,8 +119,8 @@ fn normalize_name(name: &str) -> String {
 /// Parse a `{{...}}` call, returning `None` unless it is an interlanguage link
 /// with both a Japanese article name and at least one language target.
 fn parse_call(raw: &str) -> Option<IllCall> {
-    let body = raw.get(2..raw.len().checked_sub(2)?)?;
-    let mut params = split_params(body).into_iter();
+    let body = strip_comments(raw.get(2..raw.len().checked_sub(2)?)?);
+    let mut params = split_params(&body).into_iter();
     let name = normalize_name(params.next()?);
     if !ILL_TEMPLATES.iter().any(|known| name == *known) {
         return None;
@@ -225,6 +225,32 @@ fn split_params(body: &str) -> Vec<&str> {
     }
 
     params
+}
+
+/// Remove HTML comments from a template body.
+///
+/// `MediaWiki` strips comments before splitting a call into parameters, so a
+/// comment can sit inside a parameter value, or even span the `|` that would
+/// otherwise separate two parameters. An unterminated comment swallows the
+/// rest of the body, as it does on the wiki.
+fn strip_comments(body: &str) -> String {
+    let mut stripped = String::with_capacity(body.len());
+    let mut rest = body;
+
+    while let Some(start) = rest.find("<!--") {
+        stripped.push_str(rest.get(..start).unwrap_or_default());
+        let Some(after) = rest
+            .get(start + "<!--".len()..)
+            .and_then(|after| after.find("-->").map(|end| end + "-->".len()))
+            .and_then(|end| rest.get(start + "<!--".len() + end..))
+        else {
+            return stripped;
+        };
+        rest = after;
+    }
+    stripped.push_str(rest);
+
+    stripped
 }
 
 /// Strip the `Template:` namespace prefix, in either language, if present.
@@ -377,6 +403,31 @@ mod tests {
     #[test]
     fn ignores_unterminated_calls() {
         assert_eq!(find_calls("{{仮リンク|foo|en|Foo"), no_calls());
+    }
+
+    #[test]
+    fn strips_html_comments_from_parameters() {
+        let calls = find_calls("{{仮リンク|foo|de<!--英語版よりドイツ語版が優れる-->|Foo}}");
+        assert_eq!(calls[0].ja_title, "foo");
+        assert_eq!(calls[0].targets, vec![target("de", "Foo")]);
+        assert!(
+            calls[0].raw.contains("<!--"),
+            "the reported wikitext keeps the comment"
+        );
+    }
+
+    #[test]
+    fn strips_comments_spanning_a_separator() {
+        let calls = find_calls("{{仮リンク|foo<!--x|y-->|en|Foo}}");
+        assert_eq!(calls[0].ja_title, "foo");
+        assert_eq!(calls[0].targets, vec![target("en", "Foo")]);
+    }
+
+    #[test]
+    fn drops_the_rest_after_an_unterminated_comment() {
+        let calls = find_calls("{{仮リンク|foo|en|Foo}}{{仮リンク|bar<!--|de|Bar}}");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].ja_title, "foo");
     }
 
     #[test]

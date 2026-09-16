@@ -19,6 +19,13 @@ const API_URL: &str = "https://www.wikidata.org/w/api.php";
 pub const BATCH: usize = 50;
 /// Site identifier of the Japanese Wikipedia.
 const JA_SITE: &str = "jawiki";
+/// Lag tolerated before backing off, in seconds.
+///
+/// Wikidata counts the Query Service's replication lag towards `maxlag`, and
+/// that is routinely several seconds behind, which trips the default of 5 over
+/// and over. Since this task only reads, a higher ceiling lets the scan through
+/// while still backing off when the servers are genuinely struggling.
+const MAXLAG: u32 = 120;
 /// Language codes whose Wikipedia database name does not follow the usual
 /// "replace hyphens with underscores and append `wiki`" rule.
 const SITE_EXCEPTIONS: [(&str, &str); 9] = [
@@ -66,6 +73,7 @@ impl Wikidata {
         warn!("Wikidata: falling back to anonymous access");
         let client = ApiClient::builder(API_URL)
             .set_user_agent(USER_AGENT)
+            .set_maxlag(MAXLAG)
             .build()
             .await?;
         let sites = known_sites(&client).await?;
@@ -74,8 +82,11 @@ impl Wikidata {
 
     /// Connect reusing the bot's credentials, or `None` when they do not work.
     async fn connect_as_bot(bot_api: &ApiClient) -> Option<Self> {
+        // The bot's own maxlag is copied along with its credentials, so it is
+        // overridden here rather than inherited.
         let client = Builder::from_client_with_url(bot_api, API_URL)
             .set_user_agent(USER_AGENT)
+            .set_maxlag(MAXLAG)
             .build()
             .await
             .inspect_err(|error| warn!("Wikidata: cannot build an authenticated client: {error}"))

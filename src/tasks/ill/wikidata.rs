@@ -12,6 +12,8 @@ use mwbot::{ApiClient, Error, Result};
 use serde_json::Value;
 use tracing::warn;
 
+use crate::api::with_retry;
+
 /// Wikidata API endpoint.
 const API_URL: &str = "https://www.wikidata.org/w/api.php";
 /// How many titles or ids to request per call. The bot holds no `apihighlimits`
@@ -103,16 +105,19 @@ impl Wikidata {
     /// Sent as a POST: a batch of ids is long enough that a query string can
     /// exceed the server's URI length limit.
     pub async fn ja_titles_for_ids(&self, ids: &[String]) -> Result<HashMap<String, String>> {
-        let resp = self
-            .client
-            .post_value(vec![
-                ("action", "wbgetentities".to_string()),
-                ("ids", ids.join("|")),
-                ("props", "sitelinks".to_string()),
-                ("sitefilter", JA_SITE.to_string()),
-                ("formatversion", "2".to_string()),
-            ])
-            .await?;
+        let resp = with_retry(|| async {
+            Ok(self
+                .client
+                .post_value(vec![
+                    ("action", "wbgetentities".to_string()),
+                    ("ids", ids.join("|")),
+                    ("props", "sitelinks".to_string()),
+                    ("sitefilter", JA_SITE.to_string()),
+                    ("formatversion", "2".to_string()),
+                ])
+                .await?)
+        })
+        .await?;
 
         let mut found = HashMap::new();
         if let Some(entities) = resp["entities"].as_object() {
@@ -139,17 +144,20 @@ impl Wikidata {
         site: &str,
         titles: &[String],
     ) -> Result<HashMap<String, String>> {
-        let resp = self
-            .client
-            .post_value(vec![
-                ("action", "wbgetentities".to_string()),
-                ("sites", site.to_string()),
-                ("titles", titles.join("|")),
-                ("props", "sitelinks".to_string()),
-                ("sitefilter", format!("{site}|{JA_SITE}")),
-                ("formatversion", "2".to_string()),
-            ])
-            .await?;
+        let resp = with_retry(|| async {
+            Ok(self
+                .client
+                .post_value(vec![
+                    ("action", "wbgetentities".to_string()),
+                    ("sites", site.to_string()),
+                    ("titles", titles.join("|")),
+                    ("props", "sitelinks".to_string()),
+                    ("sitefilter", format!("{site}|{JA_SITE}")),
+                    ("formatversion", "2".to_string()),
+                ])
+                .await?)
+        })
+        .await?;
         Ok(collect_sitelinks(&resp, site))
     }
 

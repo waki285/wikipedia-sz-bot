@@ -1,6 +1,6 @@
 //! `MediaWiki` API helpers shared by maintenance tasks.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, future::Future, time::Duration};
 
 use mwbot::{Bot, Error, Result};
 use tokio::time::sleep;
@@ -12,6 +12,8 @@ const TEMPLATE_NAMESPACE: i64 = 10;
 pub const MAIN_NAMESPACE: i64 = 0;
 /// How many results to request from a query page at once.
 const PAGE_SIZE: u64 = 500;
+/// How many times a transient failure is retried before giving up.
+const RETRY_ATTEMPTS: u32 = 3;
 /// How many pages may be requested at once when the response includes page
 /// content, which the API caps lower than metadata-only requests.
 pub const CONTENT_BATCH: usize = 50;
@@ -196,10 +198,8 @@ async fn count_direct_invocations(bot: &Bot, pageids: &[u64], template: &str) ->
 /// At most [`CONTENT_BATCH`] page ids may be passed, which is the API limit
 /// for requests that include page content.
 pub async fn page_contents(bot: &Bot, ids: &[String]) -> Result<serde_json::Value> {
-    let mut delay = Duration::from_secs(1);
-    let mut last_error: Option<Error> = None;
-    for _ in 0..3 {
-        let resp = bot
+    with_retry(|| async {
+        Ok(bot
             .api()
             .get_value(vec![
                 ("action", "query".to_string()),
@@ -209,18 +209,47 @@ pub async fn page_contents(bot: &Bot, ids: &[String]) -> Result<serde_json::Valu
                 ("pageids", ids.join("|")),
                 ("formatversion", "2".to_string()),
             ])
-            .await;
-        match resp {
+            .await?)
+    })
+    .await
+}
+
+/// Run an API call, retrying transient failures with exponential backoff.
+///
+/// A transport failure or a 5xx response is retried, since those clear up on
+/// their own. Anything the API itself rejected is returned straight away,
+/// because repeating the same request would fail the same way. Rate limiting
+/// is not handled here: the `mwapi` client already waits out `429` and
+/// `maxlag` responses before the error reaches us.
+pub async fn with_retry<F, Fut, T>(call: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut delay = Duration::from_secs(1);
+    let mut last_error: Option<Error> = None;
+
+    for _ in 0..RETRY_ATTEMPTS {
+        match call().await {
             Ok(value) => return Ok(value),
-            Err(error) => {
-                let error: Error = error.into();
+            Err(error) if is_transient(&error) => {
                 last_error = Some(error);
                 sleep(delay).await;
                 delay *= 2;
             }
+            Err(error) => return Err(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| Error::Unknown("failed to fetch page wikitext".to_string())))
+
+    Err(last_error.unwrap_or_else(|| Error::Unknown("request failed".to_string())))
+}
+
+/// Whether an error is worth retrying.
+fn is_transient(error: &Error) -> bool {
+    match error {
+        Error::HttpError(http) => http.status().is_none_or(|status| status.is_server_error()),
+        _ => false,
+    }
 }
 
 /// Whether `content` contains a direct invocation of `{{template}}` or
@@ -254,7 +283,44 @@ pub const fn transclusion_limit(high_limits: bool) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+
+    #[tokio::test]
+    async fn calls_once_on_success() {
+        let attempts = AtomicUsize::new(0);
+        let result = with_retry(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Ok(42) }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_a_rejected_request() {
+        let attempts = AtomicUsize::new(0);
+        let result: Result<()> = with_retry(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(Error::Unknown("rejected".to_string())) }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "an error the API returned deliberately must not be repeated"
+        );
+    }
+
+    #[test]
+    fn treats_api_errors_as_permanent() {
+        assert!(!is_transient(&Error::Unknown("rejected".to_string())));
+    }
 
     #[test]
     fn selects_limit_by_high_limits() {

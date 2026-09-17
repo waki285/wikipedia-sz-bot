@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use mwbot::{Bot, Result};
 
+use crate::api::with_retry;
+
 /// Redirect hops followed before giving up, which bounds the work done on a
 /// redirect loop the API did not resolve.
 const MAX_HOPS: usize = 4;
@@ -26,16 +28,19 @@ pub enum PageState {
 /// batches accordingly. Sent as a POST, since a batch of percent-encoded
 /// titles can exceed the server's URI length limit.
 pub async fn page_states(bot: &Bot, titles: &[String]) -> Result<HashMap<String, PageState>> {
-    let resp = bot
-        .api()
-        .post_value(vec![
-            ("action", "query".to_string()),
-            ("prop", "info".to_string()),
-            ("titles", titles.join("|")),
-            ("redirects", "1".to_string()),
-            ("formatversion", "2".to_string()),
-        ])
-        .await?;
+    let resp = with_retry(|| async {
+        Ok(bot
+            .api()
+            .post_value(vec![
+                ("action", "query".to_string()),
+                ("prop", "info".to_string()),
+                ("titles", titles.join("|")),
+                ("redirects", "1".to_string()),
+                ("formatversion", "2".to_string()),
+            ])
+            .await?)
+    })
+    .await?;
 
     let normalized = pairs(&resp["query"]["normalized"]);
     let redirects = pairs(&resp["query"]["redirects"]);
